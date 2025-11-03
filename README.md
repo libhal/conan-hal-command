@@ -20,7 +20,7 @@ conan hal --version
 Should respond with something like the text below:
 
 ```plaintext
-conan-hal-command: 0.0.0
+conan-hal-command: x.y.z
 ```
 
 ## 🔧 Available Commands
@@ -79,14 +79,12 @@ conan hal setup --skip-default-profile --skip-compiler-profiles
 
 ---
 
-### Other Commands (Coming Soon)
+### 🔮 Future Commands
 
-- `conan hal new` - Create a new libhal project, library, platform, or board
-- `conan hal install` - Install profiles or cross-compilers
-- `conan hal build-matrix` - Build against multiple profiles/configurations
-- `conan hal deploy` - Build and create packages for deployment
-- `conan hal profiles` - Manage libhal profiles
-- `conan hal package` - Create Conan package without deployment
+- `conan hal new` - Create a new libhal project, device library, platform library, or board library
+- `conan hal download-compilers` - Download & install cross-compilers
+- `conan hal build` - Build against multiple profiles/configurations
+- `conan hal package` - Similiar to build but also installs packages
 - `conan hal flash` - Flash binary to target device
 - `conan hal debug` - Start debug session with target device
 
