@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import platform
 from conan.api.conan_api import ConanAPI
 from conan.api.model import Remote
 from conan.cli.command import conan_command, conan_subcommand
@@ -54,18 +55,25 @@ def hal_setup(conan_api: ConanAPI, parser, subparser, *args):
     subparser.add_argument(
         '--skip-remotes', action='store_true', help='Skip remote configuration')
     subparser.add_argument(
-        '--skip-profiles', action='store_true', help='Skip profile installation')
+        '--skip-user-settings', action='store_true', help='Skip user settings installation')
     subparser.add_argument(
-        '--profile-name', default='default', help='Name for the host profile (default: "default")')
+        '--skip-default', action='store_true', help='Skip default host profile installation')
+    subparser.add_argument(
+        '--skip-target-profiles', action='store_true', help='Skip target device profiles installation')
+    subparser.add_argument(
+        '--skip-compiler-profiles', action='store_true', help='Skip compiler profiles installation')
     args = parser.parse_args(*args)
 
     logger.info("Setting up libhal environment...")
 
+    REPO = "https://libhal.jfrog.io/artifactory/api/conan/trunk-conan"
+    REMOTE_NAME = "libhal"
+    CONFIG_GIT_LINK = "https://github.com/libhal/conan-config.git"
+    CONFIG_SRC = "profiles/baremetal/v2"
+
     # Step 1: Add the libhal remote
     if not args.skip_remotes:
         logger.info("\n📦 Configuring libhal-trunk remote...")
-        REPO = "https://libhal.jfrog.io/artifactory/api/conan/trunk-conan"
-        REMOTE_NAME = "libhal"
         REPO_REMOTE = Remote(REMOTE_NAME, REPO)
         logger.debug(f"Remote URL: {REPO}")
 
@@ -84,51 +92,74 @@ def hal_setup(conan_api: ConanAPI, parser, subparser, *args):
             logger.error(f"❌ Failed to configure remote: {e}")
             return
 
-    # Step 2: Install baremetal settings
-    if not args.skip_profiles:
-        logger.info("\n⚙️  Installing baremetal settings...")
-        CONFIG_GIT_LINK = "https://github.com/libhal/conan-config.git"
-        CONFIG_SRC = "profiles/baremetal/v2"
-        logger.debug(f"Source: {CONFIG_GIT_LINK} ({CONFIG_SRC})")
+    # Step 2: Install user settings
+    if not args.skip_user_settings:
+        logger.info("\n⚙️  Installing user settings...")
+        logger.info(f"ℹ️ Source: {CONFIG_GIT_LINK} ({CONFIG_SRC})")
         try:
             conan_api.config.install(
                 CONFIG_GIT_LINK, True, source_folder=CONFIG_SRC,
             )
-            logger.info("✅ Baremetal settings installed successfully")
+            logger.info("✅ User settings installed successfully")
         except Exception as e:
-            logger.error(f"❌ Failed to install baremetal settings: {e}")
+            logger.error(f"❌ Failed to install user settings: {e}")
             return
 
-        # Step 3: Detect default profile (without force to allow user to keep existing)
-        logger.info("\n🔍 Detecting host profile...")
-        try:
-            # Detect the default profile
-            logger.debug("Running conan profile detect...")
-            conan_api.profiles.detect()
+    # Step 3: Detect default profile and install host-specific profile
+    if not args.skip_default:
+        # Host profile mapping for different OS and architecture combinations
+        HOST_PROFILE_MAP = {
+            ('Linux', 'x86_64'): 'profiles/x86_64/linux/',
+            ('Linux', 'aarch64'): 'profiles/armv8/linux/',
+            ('Linux', 'arm64'): 'profiles/armv8/linux/',
+            ('Windows', 'AMD64'): 'profiles/x86_64/windows/',
+            ('Windows', 'x86_64'): 'profiles/x86_64/windows/',
+            ('Windows', 'ARM64'): 'profiles/armv8/windows/',
+            ('Windows', 'aarch64'): 'profiles/armv8/windows/',
+            ('Darwin', 'x86_64', '13'): 'profiles/x86_64/mac-13/',
+            ('Darwin', 'x86_64', '14'): 'profiles/x86_64/mac-14/',
+            ('Darwin', 'x86_64', '15'): 'profiles/x86_64/mac-15/',
+            ('Darwin', 'arm64', '13'): 'profiles/armv8/mac-13/',
+            ('Darwin', 'arm64', '14'): 'profiles/armv8/mac-14/',
+            ('Darwin', 'arm64', '15'): 'profiles/armv8/mac-15/',
+        }
 
-            # If user wants a custom name, copy the default profile
-            if args.profile_name != 'default':
-                logger.info(
-                    f"📝 Creating profile '{args.profile_name}' from detected settings...")
-                # Get the default profile content
-                default_profile = conan_api.profiles.get_profile(["default"])
-                logger.debug(
-                    f"Copying default profile to '{args.profile_name}'")
-                # Save it with the new name
-                conan_api.profiles.save(args.profile_name, default_profile)
-                logger.info(
-                    f"✅ Profile '{args.profile_name}' created successfully")
+        try:
+            # Detect OS and architecture
+            os_type = platform.system()
+            arch = platform.machine()
+            logger.debug(f"Detected OS: {os_type}, Architecture: {arch}")
+
+            # Determine profile source folder
+            if os_type == 'Darwin':
+                # For macOS, also get the major version
+                mac_version = platform.mac_ver()[0].split('.')[0]
+                logger.debug(f"Detected macOS version: {mac_version}")
+                PROFILE_SRC = HOST_PROFILE_MAP[(
+                    os_type, arch, mac_version)]
             else:
-                logger.info("✅ Default profile detected successfully")
+                PROFILE_SRC = HOST_PROFILE_MAP[(os_type, arch)]
+
+            logger.info(
+                f"📥 Installing host profile for {os_type} {arch}...")
+            logger.info(
+                f"ℹ️ Profile source: {CONFIG_GIT_LINK} ({PROFILE_SRC})")
+            conan_api.config.install(
+                CONFIG_GIT_LINK, True,
+                source_folder=PROFILE_SRC,
+                target_folder="profiles",
+            )
+            logger.info("✅ Host profile installed successfully")
         except Exception as e:
             logger.error(f"❌ Failed to detect profile: {e}")
             return
 
-        # Step 4: Install ARM MCU device profiles
+    # Step 4: Install ARM MCU device profiles
+    if not args.skip_target_profiles:
         logger.info("\n🔧 Installing ARM MCU device profiles...")
         ARM_MCU_REPO = "https://github.com/libhal/libhal-arm-mcu.git"
         ARM_MCU_SRC = "conan/profiles/v1"
-        logger.debug(f"Source: {ARM_MCU_REPO} ({ARM_MCU_SRC})")
+        logger.debug(f"ℹ️ Source: {ARM_MCU_REPO} ({ARM_MCU_SRC})")
         try:
             conan_api.config.install(
                 ARM_MCU_REPO, True,
@@ -141,14 +172,15 @@ def hal_setup(conan_api: ConanAPI, parser, subparser, *args):
             return
 
         # Step 5: Install ARM GCC compiler profiles
+    if not args.skip_compiler_profiles:
         logger.info("\n🛠️  Installing ARM GCC compiler profiles...")
-        ARM_GNU_TOOLCHAIN = "https://github.com/libhal/arm-gnu-toolchain.git"
+        ARM_GNU_TOOLCHAIN_REPO = "https://github.com/libhal/arm-gnu-toolchain.git"
         ARM_GNU_PROFILES = "conan/profiles/v1"
-        logger.debug(
-            "Source: https://github.com/libhal/arm-gnu-toolchain.git (conan/profiles/v1)")
+        logger.info(
+            f"ℹ️ Source: {ARM_GNU_TOOLCHAIN_REPO} ({ARM_GNU_PROFILES})")
         try:
             conan_api.config.install(
-                ARM_GNU_TOOLCHAIN,
+                ARM_GNU_TOOLCHAIN_REPO,
                 True,
                 source_folder=ARM_GNU_PROFILES,
                 target_folder="profiles"
@@ -272,6 +304,18 @@ def hal(conan_api: ConanAPI, parser, *args):
     """
     libhal development tools for embedded systems
     """
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Enable verbose output'
+    )
+    parser.add_argument(
+        '--version',
+        action='version',
+        version='conan-hal-command: 0.0.0',
+        help='Show version and exit'
+    )
+
     parser.epilog = """
 Examples:
   conan hal setup
@@ -281,8 +325,11 @@ Examples:
 Use "conan hal <command> --help" for more information on a specific command.
 """
 
+    # Parse args to get verbose flag
+    parsed_args, _ = parser.parse_known_args(*args)
+
     # Configure logging based on verbose flag
-    log_level = logging.INFO
+    log_level = logging.DEBUG if parsed_args.verbose else logging.INFO
     logging.basicConfig(
         level=log_level,
         format='%(message)s',
