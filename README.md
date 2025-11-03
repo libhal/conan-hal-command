@@ -57,7 +57,7 @@ conan hal setup --skip-remotes
 conan hal setup --skip-user-settings
 
 # Skip default host profile installation
-conan hal setup --skip-default
+conan hal setup --skip-default-profile
 
 # Skip target device profiles installation
 conan hal setup --skip-target-profiles
@@ -66,14 +66,14 @@ conan hal setup --skip-target-profiles
 conan hal setup --skip-compiler-profiles
 
 # Combine multiple skip flags
-conan hal setup --skip-default --skip-compiler-profiles
+conan hal setup --skip-default-profile --skip-compiler-profiles
 ```
 
 **Options:**
 
 - `--skip-remotes` - Skip adding/updating the libhal remote
 - `--skip-user-settings` - Skip user settings (baremetal settings) installation
-- `--skip-default` - Skip default host profile installation
+- `--skip-default-profile` - Skip default host profile installation
 - `--skip-target-profiles` - Skip target device profiles installation
 - `--skip-compiler-profiles` - Skip cross compiler profiles installation
 

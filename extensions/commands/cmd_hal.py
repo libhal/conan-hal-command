@@ -57,7 +57,7 @@ def hal_setup(conan_api: ConanAPI, parser, subparser, *args):
     subparser.add_argument(
         '--skip-user-settings', action='store_true', help='Skip user settings installation')
     subparser.add_argument(
-        '--skip-default', action='store_true', help='Skip default host profile installation')
+        '--skip-default-profile', action='store_true', help='Skip default host profile installation')
     subparser.add_argument(
         '--skip-target-profiles', action='store_true', help='Skip target device profiles installation')
     subparser.add_argument(
@@ -106,7 +106,7 @@ def hal_setup(conan_api: ConanAPI, parser, subparser, *args):
             return
 
     # Step 3: Detect default profile and install host-specific profile
-    if not args.skip_default:
+    if not args.skip_default_profile:
         # Host profile mapping for different OS and architecture combinations
         HOST_PROFILE_MAP = {
             ('Linux', 'x86_64'): 'profiles/x86_64/linux/',
