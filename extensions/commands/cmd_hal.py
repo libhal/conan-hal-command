@@ -17,41 +17,55 @@
 import logging
 import platform
 from pathlib import Path
+from typing import List, Optional
 from conan.api.conan_api import ConanAPI
 from conan.api.model import Remote
 from conan.cli.command import conan_command, conan_subcommand
-import time
 
 logger = logging.getLogger(__name__)
 
 
-def generate_arm_cortex_m_profiles():
+class Profile:
+    """
+    Represents a Conan profile with a name and content.
+    """
+
+    def __init__(self, name: str, content: str):
+        self.name = name
+        self.content = content
+
+
+class BuildProfileResult:
+    """
+    Represents the result of building a profile.
+    """
+
+    def __init__(self, profile_name: str, success: bool, log_file: Optional[Path]):
+        self.profile_name = profile_name
+        self.success = success
+        self.log_file = log_file
+
+
+def generate_arm_cortex_m_profiles() -> List[Profile]:
     """
     Generate all possible profile combinations for ARM GCC toolchains
 
     Returns:
-        list: List of dictionaries containing profile configurations
-              Each dict has keys: arch, compiler, compiler_version, compiler_package, os
+        List[Profile]: List of Profile objects containing profile configurations
     """
     compilers = {
         "gcc": {
             'package': 'arm-gnu-toolchain',
             'versions': ['12.3', '13.2', '13.3', '14.2']
         }
+        # We plan to support LLVM at some future point
     }
+
+    # Architectures can be either strings or tuples (arch_name, min_version)
+    # Tuple format: (architecture_name, minimum_compiler_version)
     architectures = [
-        'cortex-m0',
-        'cortex-m0plus',
-        'cortex-m1',
-        'cortex-m3',
-        'cortex-m4',
-        'cortex-m4f',
-        'cortex-m7',
-        'cortex-m23',
-        'cortex-m33',
-        'cortex-m35p',
-        'cortex-m55',
-        'cortex-m85',
+        'cortex-m0', 'cortex-m0plus', 'cortex-m1', 'cortex-m3', 'cortex-m4', 'cortex-m4f', 'cortex-m7', 'cortex-m7f', 'cortex-m7d', 'cortex-m23', 'cortex-m33', 'cortex-m33f', 'cortex-m35pf', 'cortex-m55',
+        ('cortex-m85', '13.2'),  # Requires GCC 13.2 or newer
     ]
 
     build_types = [
@@ -60,11 +74,36 @@ def generate_arm_cortex_m_profiles():
         'MinSizeRel',
     ]
 
-    profiles = []
+    def version_compare(v1: str, v2: str) -> int:
+        """Compare two version strings. Returns -1 if v1 < v2, 0 if equal, 1 if v1 > v2"""
+        v1_parts = [int(x) for x in v1.split('.')]
+        v2_parts = [int(x) for x in v2.split('.')]
+
+        for i in range(max(len(v1_parts), len(v2_parts))):
+            part1 = v1_parts[i] if i < len(v1_parts) else 0
+            part2 = v2_parts[i] if i < len(v2_parts) else 0
+            if part1 < part2:
+                return -1
+            elif part1 > part2:
+                return 1
+        return 0
+
+    profiles: List[Profile] = []
     for compiler, compiler_config in compilers.items():
         compiler_package = compiler_config['package']
-        for arch in architectures:
+        for arch_entry in architectures:
+            # Check if this is a tuple with minimum version requirement
+            if isinstance(arch_entry, tuple):
+                arch, min_version = arch_entry
+            else:
+                arch = arch_entry
+                min_version = None
+
             for version in compiler_config['versions']:
+                # Skip if compiler version doesn't meet minimum requirement
+                if min_version and version_compare(version, min_version) < 0:
+                    continue
+
                 for build_type in build_types:
                     NAME = f"{arch}-{compiler}-{version}-{build_type}"
                     TEXT = f"""[settings]
@@ -79,10 +118,7 @@ build_type={build_type}
 [tool_requires]
 {compiler_package}/{version}"""
 
-                    profiles.append({
-                        'name': NAME,
-                        'contents': TEXT
-                    })
+                    profiles.append(Profile(NAME, TEXT))
 
     return profiles
 
@@ -312,6 +348,14 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
 
     # Create build-matrix directory for logs
     BUILD_PATH: Path = Path(args.path).resolve()
+
+    # Check for conanfile.py existence
+    if not (BUILD_PATH / "conanfile.py").exists():
+        logger.error(f"❌ No conanfile.py found in {BUILD_PATH}")
+        logger.error(
+            "Please ensure you're running this command in a directory with a 'conanfile.py' file")
+        return 1
+
     BUILD_DIR: Path = BUILD_PATH / "build-matrix"
     BUILD_DIR.mkdir(exist_ok=True)
     logger.info(f"Binaries will be written to: {BUILD_DIR}")
@@ -321,10 +365,10 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
     failed_builds = []
     lock = threading.Lock()
 
-    def build_profile(profile):
+    def build_profile(profile: Profile) -> BuildProfileResult:
         """Build a single profile and return result"""
         nonlocal completed_count
-        PROFILE_BUILD_DIR = BUILD_DIR / profile['name']
+        PROFILE_BUILD_DIR = BUILD_DIR / profile.name
         PROFILE_PATH = PROFILE_BUILD_DIR / 'profile'
         LOG_FILE = PROFILE_BUILD_DIR / 'log'
 
@@ -333,7 +377,7 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
         logging.debug(f"LOG_FILE={LOG_FILE}")
 
         PROFILE_BUILD_DIR.mkdir(exist_ok=True)
-        Path(PROFILE_PATH).write_text(profile['contents'])
+        Path(PROFILE_PATH).write_text(profile.content)
         COMMAND = ['conan', 'build', str(BUILD_PATH),
                    '-pr', str(PROFILE_PATH.resolve()),
                    '-of', str(PROFILE_BUILD_DIR.resolve())]
@@ -359,30 +403,39 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
                 completed_count += 1
                 if result.returncode == 0:
                     logger.info(
-                        f"✅ [{completed_count}/{total_profiles}] {profile['name']}")
-                    return (profile['name'], True, None)
+                        f"✅ [{completed_count}/{total_profiles}] {profile.name}")
+                    return BuildProfileResult(profile.name, True, None)
                 else:
                     logger.error(
-                        f"❌ [{completed_count}/{total_profiles}] {profile['name']}")
-                    return (profile['name'], False, LOG_FILE)
+                        f"❌ [{completed_count}/{total_profiles}] {profile.name}")
+                    return BuildProfileResult(profile.name, False, LOG_FILE)
 
         except subprocess.TimeoutExpired:
             with lock:
                 completed_count += 1
                 logger.error(
-                    f"‼️⏱️[{completed_count}/{total_profiles}] {profile['name']} TIMEOUT")
+                    f"‼️⏱️[{completed_count}/{total_profiles}] {profile.name} TIMEOUT")
                 LOG_FILE.write_text(f"Build timed out after 600 seconds")
-                return (profile['name'], False, LOG_FILE)
+                return BuildProfileResult(profile.name, False, LOG_FILE)
         except Exception as e:
             with lock:
                 completed_count += 1
                 logger.error(
-                    f"‼️ [{completed_count}/{total_profiles}] {profile['name']} ERROR: {e}")
+                    f"‼️ [{completed_count}/{total_profiles}] {profile.name} ERROR: {e}")
                 LOG_FILE.write_text(f"Build error: {e}")
-                return (profile['name'], False, LOG_FILE)
+                return BuildProfileResult(profile.name, False, LOG_FILE)
 
-    for profile in profiles:
-        build_profile(profile)
+    # Execute builds in parallel using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=args.jobs) as executor:
+        # Submit all build jobs
+        future_to_profile = {executor.submit(
+            build_profile, profile): profile for profile in profiles}
+
+        # Collect results as they complete
+        for future in as_completed(future_to_profile):
+            result = future.result()
+            if not result.success:
+                failed_builds.append(result)
 
     # Summary
     logger.info(f"\n{'='*60}")
@@ -393,8 +446,8 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
 
     if failed_builds:
         logger.error("\nFailed builds:")
-        for profile_name, LOG_FILE in failed_builds:
-            logger.error(f"  - {profile_name}: {LOG_FILE}")
+        for result in failed_builds:
+            logger.error(f"  - {result.profile_name}: {result.log_file}")
         return 1
     else:
         logger.info("\nAll builds successful!")
