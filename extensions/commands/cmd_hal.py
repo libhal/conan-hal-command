@@ -99,43 +99,6 @@ def generate_all_profiles():
     return arm_cortex_m_profiles
 
 
-def write_profile_to_file(profile_dir, profile):
-    """
-    Write a profile configuration to a file
-
-    Args:
-        profile_dir: Directory to write the profile file to (Path or str)
-        profile: Dictionary containing profile configuration
-
-    Returns:
-        Path: Path to the written profile file
-    """
-
-    profile_dir = Path(profile_dir)
-
-    # Generate profile filename: e.g., cortex-m4f-gcc-12.3
-    profile_name = f"{profile['arch']}-{profile['compiler']}-{profile['compiler_version']}-{profile['build_type']}"
-    profile_path = profile_dir / profile_name
-
-    # Generate profile content
-    profile_content = f"""[settings]
-os={profile['os']}
-arch={profile['arch']}
-compiler={profile['compiler']}
-compiler.version={profile['compiler_version']}
-compiler.libcxx={profile['compiler.libcxx']}
-compiler.cppstd={profile['compiler.cppstd']}
-build_type={profile['build_type']}
-
-[tool_requires]
-{profile['compiler_package']}/{profile['compiler_version']}
-"""
-
-    profile_path.write_text(profile_content)
-
-    return profile_path
-
-
 @conan_subcommand()
 def hal_new(conan_api: ConanAPI, parser, subparser, *args):
     """
@@ -328,7 +291,6 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
     Build against multiple architecture/compiler profile combinations
     """
     import os
-    import tempfile
     import subprocess
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
@@ -352,7 +314,7 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
     BUILD_PATH: Path = Path(args.path).resolve()
     BUILD_DIR: Path = BUILD_PATH / "build-matrix"
     BUILD_DIR.mkdir(exist_ok=True)
-    logger.info(f"Logs will be written to: {BUILD_DIR}")
+    logger.info(f"Binaries will be written to: {BUILD_DIR}")
 
     # Track progress
     completed_count = 0
@@ -365,28 +327,26 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
         PROFILE_BUILD_DIR = BUILD_DIR / profile['name']
         PROFILE_PATH = PROFILE_BUILD_DIR / 'profile'
         LOG_FILE = PROFILE_BUILD_DIR / 'log'
-        logging.info(f"PROFILE_BUILD_DIR={PROFILE_BUILD_DIR}")
-        logging.info(f"PROFILE_PATH={PROFILE_PATH}")
-        logging.info(f"LOG_FILE={LOG_FILE}")
 
-        exit(1)
+        logging.debug(f"PROFILE_BUILD_DIR={PROFILE_BUILD_DIR}")
+        logging.debug(f"PROFILE_PATH={PROFILE_PATH}")
+        logging.debug(f"LOG_FILE={LOG_FILE}")
 
+        PROFILE_BUILD_DIR.mkdir(exist_ok=True)
         Path(PROFILE_PATH).write_text(profile['contents'])
-
+        COMMAND = ['conan', 'build', str(BUILD_PATH),
+                   '-pr', str(PROFILE_PATH.resolve()),
+                   '-of', str(PROFILE_BUILD_DIR.resolve())]
         try:
             # Run conan build command
-            result = subprocess.run(
-                ['conan', 'build', str(BUILD_PATH),
-                    '-pr', PROFILE_PATH.resolve(),
-                    '-of', PROFILE_BUILD_DIR],
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout per build
-            )
+            result = subprocess.run(COMMAND,
+                                    capture_output=True,
+                                    text=True,
+                                    # 5 minute timeout per build
+                                    timeout=300)
 
             # Write logs
-            log_content = f"Profile: {profile_name}\n"
-            log_content += f"Command: conan build {BUILD_PATH} -pr {PROFILE_PATH}\n"
+            log_content = f"Command: {' '.join(COMMAND)}\n"
             log_content += f"Return code: {result.returncode}\n\n"
             log_content += "=== STDOUT ===\n"
             log_content += result.stdout
@@ -399,44 +359,30 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
                 completed_count += 1
                 if result.returncode == 0:
                     logger.info(
-                        f"[{completed_count}/{total_profiles}] {profile_name} finished building")
-                    return (profile_name, True, None)
+                        f"✅ [{completed_count}/{total_profiles}] {profile['name']}")
+                    return (profile['name'], True, None)
                 else:
                     logger.error(
-                        f"[{completed_count}/{total_profiles}] {profile_name} FAILED")
-                    return (profile_name, False, LOG_FILE)
+                        f"❌ [{completed_count}/{total_profiles}] {profile['name']}")
+                    return (profile['name'], False, LOG_FILE)
 
         except subprocess.TimeoutExpired:
             with lock:
                 completed_count += 1
                 logger.error(
-                    f"[{completed_count}/{total_profiles}] {profile_name} TIMEOUT")
+                    f"‼️⏱️[{completed_count}/{total_profiles}] {profile['name']} TIMEOUT")
                 LOG_FILE.write_text(f"Build timed out after 600 seconds")
-                return (profile_name, False, LOG_FILE)
+                return (profile['name'], False, LOG_FILE)
         except Exception as e:
             with lock:
                 completed_count += 1
                 logger.error(
-                    f"[{completed_count}/{total_profiles}] {profile_name} ERROR: {e}")
+                    f"‼️ [{completed_count}/{total_profiles}] {profile['name']} ERROR: {e}")
                 LOG_FILE.write_text(f"Build error: {e}")
-                return (profile_name, False, LOG_FILE)
+                return (profile['name'], False, LOG_FILE)
 
-    # Execute builds in parallel
-    with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-        futures = [executor.submit(build_profile, profile)
-                   for profile in profiles]
-
-        for future in as_completed(futures):
-            profile_name, success, LOG_FILE = future.result()
-            if not success:
-                failed_builds.append((profile_name, LOG_FILE))
-                if not args.continue_on_error:
-                    # Cancel remaining builds
-                    for f in futures:
-                        f.cancel()
-                    logger.error(
-                        "Stopping due to build failure (use --continue-on-error to continue)")
-                    break
+    for profile in profiles:
+        build_profile(profile)
 
     # Summary
     logger.info(f"\n{'='*60}")
