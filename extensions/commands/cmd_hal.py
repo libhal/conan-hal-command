@@ -16,12 +16,124 @@
 
 import logging
 import platform
+from pathlib import Path
 from conan.api.conan_api import ConanAPI
 from conan.api.model import Remote
 from conan.cli.command import conan_command, conan_subcommand
-
+import time
 
 logger = logging.getLogger(__name__)
+
+
+def generate_arm_cortex_m_profiles():
+    """
+    Generate all possible profile combinations for ARM GCC toolchains
+
+    Returns:
+        list: List of dictionaries containing profile configurations
+              Each dict has keys: arch, compiler, compiler_version, compiler_package, os
+    """
+    compilers = {
+        "gcc": {
+            'package': 'arm-gnu-toolchain',
+            'versions': ['12.3', '13.2', '13.3', '14.2']
+        }
+    }
+    architectures = [
+        'cortex-m0',
+        'cortex-m0plus',
+        'cortex-m1',
+        'cortex-m3',
+        'cortex-m4',
+        'cortex-m4f',
+        'cortex-m7',
+        'cortex-m23',
+        'cortex-m33',
+        'cortex-m35p',
+        'cortex-m55',
+        'cortex-m85',
+    ]
+
+    build_types = [
+        'Debug',
+        'Release',
+        'MinSizeRel',
+    ]
+
+    profiles = []
+    for compiler, compiler_config in compilers.items():
+        compiler_package = compiler_config['package']
+        for arch in architectures:
+            for version in compiler_config['versions']:
+                for build_type in build_types:
+                    NAME = f"{arch}-{compiler}-{version}-{build_type}"
+                    TEXT = f"""[settings]
+os=baremetal
+arch={arch}
+compiler={compiler}
+compiler.version={version}
+compiler.libcxx=libstdc++11
+compiler.cppstd=23
+build_type={build_type}
+
+[tool_requires]
+{compiler_package}/{version}"""
+
+                    profiles.append({
+                        'name': NAME,
+                        'contents': TEXT
+                    })
+
+    return profiles
+
+
+def generate_all_profiles():
+    """
+    Generate all possible profile combinations for ARM GCC toolchains
+
+    Returns:
+        list: List of dictionaries containing profile configurations
+              Each dict has keys: arch, compiler, compiler_version, compiler_package, os
+    """
+    arm_cortex_m_profiles = generate_arm_cortex_m_profiles()
+    return arm_cortex_m_profiles
+
+
+def write_profile_to_file(profile_dir, profile):
+    """
+    Write a profile configuration to a file
+
+    Args:
+        profile_dir: Directory to write the profile file to (Path or str)
+        profile: Dictionary containing profile configuration
+
+    Returns:
+        Path: Path to the written profile file
+    """
+
+    profile_dir = Path(profile_dir)
+
+    # Generate profile filename: e.g., cortex-m4f-gcc-12.3
+    profile_name = f"{profile['arch']}-{profile['compiler']}-{profile['compiler_version']}-{profile['build_type']}"
+    profile_path = profile_dir / profile_name
+
+    # Generate profile content
+    profile_content = f"""[settings]
+os={profile['os']}
+arch={profile['arch']}
+compiler={profile['compiler']}
+compiler.version={profile['compiler_version']}
+compiler.libcxx={profile['compiler.libcxx']}
+compiler.cppstd={profile['compiler.cppstd']}
+build_type={profile['build_type']}
+
+[tool_requires]
+{profile['compiler_package']}/{profile['compiler_version']}
+"""
+
+    profile_path.write_text(profile_content)
+
+    return profile_path
 
 
 @conan_subcommand()
@@ -213,18 +325,134 @@ def hal_install(conan_api: ConanAPI, parser, subparser, *args):
 @conan_subcommand()
 def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
     """
-    Build against multiple profiles/configurations
+    Build against multiple architecture/compiler profile combinations
     """
-    subparser.add_argument('--all', action='store_true',
-                           help='Build for all profiles')
-    subparser.add_argument('--profiles', nargs='+',
-                           help='Specific profiles to build')
-    subparser.add_argument('--configurations', nargs='+',
-                           help='Build configurations')
+    import os
+    import tempfile
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    subparser.add_argument('path', nargs='?', default='.',
+                           help='Path to build (default: current directory)')
+    subparser.add_argument('--continue-on-error', action='store_true',
+                           help='Continue building remaining profiles if one fails')
+    subparser.add_argument('-j', '--jobs', type=int, default=os.cpu_count(),
+                           help=f'Number of parallel builds (default: {os.cpu_count()})')
     args = parser.parse_args(*args)
 
-    logger.info("Building matrix...")
-    logger.info("TODO: Implement build-matrix command")
+    # Get all profiles
+    profiles = generate_all_profiles()
+    total_profiles = len(profiles)
+
+    logger.info(f"Building {total_profiles} profile combinations...")
+    logger.info(f"Using {args.jobs} parallel jobs")
+
+    # Create build-matrix directory for logs
+    BUILD_PATH: Path = Path(args.path).resolve()
+    BUILD_DIR: Path = BUILD_PATH / "build-matrix"
+    BUILD_DIR.mkdir(exist_ok=True)
+    logger.info(f"Logs will be written to: {BUILD_DIR}")
+
+    # Track progress
+    completed_count = 0
+    failed_builds = []
+    lock = threading.Lock()
+
+    def build_profile(profile):
+        """Build a single profile and return result"""
+        nonlocal completed_count
+        PROFILE_BUILD_DIR = BUILD_DIR / profile['name']
+        PROFILE_PATH = PROFILE_BUILD_DIR / 'profile'
+        LOG_FILE = PROFILE_BUILD_DIR / 'log'
+        logging.info(f"PROFILE_BUILD_DIR={PROFILE_BUILD_DIR}")
+        logging.info(f"PROFILE_PATH={PROFILE_PATH}")
+        logging.info(f"LOG_FILE={LOG_FILE}")
+
+        exit(1)
+
+        Path(PROFILE_PATH).write_text(profile['contents'])
+
+        try:
+            # Run conan build command
+            result = subprocess.run(
+                ['conan', 'build', str(BUILD_PATH),
+                    '-pr', PROFILE_PATH.resolve(),
+                    '-of', PROFILE_BUILD_DIR],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout per build
+            )
+
+            # Write logs
+            log_content = f"Profile: {profile_name}\n"
+            log_content += f"Command: conan build {BUILD_PATH} -pr {PROFILE_PATH}\n"
+            log_content += f"Return code: {result.returncode}\n\n"
+            log_content += "=== STDOUT ===\n"
+            log_content += result.stdout
+            log_content += "\n=== STDERR ===\n"
+            log_content += result.stderr
+            LOG_FILE.write_text(log_content)
+
+            # Update progress
+            with lock:
+                completed_count += 1
+                if result.returncode == 0:
+                    logger.info(
+                        f"[{completed_count}/{total_profiles}] {profile_name} finished building")
+                    return (profile_name, True, None)
+                else:
+                    logger.error(
+                        f"[{completed_count}/{total_profiles}] {profile_name} FAILED")
+                    return (profile_name, False, LOG_FILE)
+
+        except subprocess.TimeoutExpired:
+            with lock:
+                completed_count += 1
+                logger.error(
+                    f"[{completed_count}/{total_profiles}] {profile_name} TIMEOUT")
+                LOG_FILE.write_text(f"Build timed out after 600 seconds")
+                return (profile_name, False, LOG_FILE)
+        except Exception as e:
+            with lock:
+                completed_count += 1
+                logger.error(
+                    f"[{completed_count}/{total_profiles}] {profile_name} ERROR: {e}")
+                LOG_FILE.write_text(f"Build error: {e}")
+                return (profile_name, False, LOG_FILE)
+
+    # Execute builds in parallel
+    with ThreadPoolExecutor(max_workers=args.jobs) as executor:
+        futures = [executor.submit(build_profile, profile)
+                   for profile in profiles]
+
+        for future in as_completed(futures):
+            profile_name, success, LOG_FILE = future.result()
+            if not success:
+                failed_builds.append((profile_name, LOG_FILE))
+                if not args.continue_on_error:
+                    # Cancel remaining builds
+                    for f in futures:
+                        f.cancel()
+                    logger.error(
+                        "Stopping due to build failure (use --continue-on-error to continue)")
+                    break
+
+    # Summary
+    logger.info(f"\n{'='*60}")
+    logger.info(
+        f"Build Matrix Complete: {completed_count}/{total_profiles} profiles processed")
+    logger.info(f"Successful: {completed_count - len(failed_builds)}")
+    logger.info(f"Failed: {len(failed_builds)}")
+
+    if failed_builds:
+        logger.error("\nFailed builds:")
+        for profile_name, LOG_FILE in failed_builds:
+            logger.error(f"  - {profile_name}: {LOG_FILE}")
+        return 1
+    else:
+        logger.info("\nAll builds successful!")
+        return 0
 
 
 @conan_subcommand()
