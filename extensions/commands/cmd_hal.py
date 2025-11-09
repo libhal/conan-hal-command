@@ -504,44 +504,142 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
 
 
 @conan_subcommand()
-def hal_deploy(conan_api: ConanAPI, parser, subparser, *args):
-    """
-    Build and create packages for deployment
-    """
-    subparser.add_argument('--remote', help='Remote to deploy to')
-    subparser.add_argument('--profile', help='Profile to use')
-    args = parser.parse_args(*args)
-
-    logger.info("Deploying packages...")
-    logger.info("TODO: Implement deploy command")
-
-
-@conan_subcommand()
-def hal_profiles(conan_api: ConanAPI, parser, subparser, *args):
-    """
-    Manage libhal profiles
-    """
-    subparser.add_argument('action', choices=['list', 'show', 'create', 'delete'],
-                           help='Action to perform')
-    subparser.add_argument('--name', help='Profile name')
-    args = parser.parse_args(*args)
-
-    logger.info("Managing profiles...")
-    logger.info("TODO: Implement profiles command")
-
-
-@conan_subcommand()
 def hal_package(conan_api: ConanAPI, parser, subparser, *args):
     """
-    Create Conan package without deployment
+    Create Conan package against multiple architecture/compiler profile combinations
     """
-    subparser.add_argument('--profile', help='Profile to use')
-    subparser.add_argument('--export', action='store_true',
-                           help='Export to local cache')
+    import os
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    subparser.add_argument('path', nargs='?', default='.',
+                           help='Path to build (default: current directory)')
+    subparser.add_argument('--version', required=True,
+                           help='Version to use for conan create command')
+    subparser.add_argument('--continue-on-error', action='store_true',
+                           help='Continue building remaining profiles if one fails')
+    subparser.add_argument('-j', '--jobs', type=int, default=os.cpu_count(),
+                           help=f'Number of parallel builds (default: {os.cpu_count()})')
     args = parser.parse_args(*args)
 
-    logger.info("Creating package...")
-    logger.info("TODO: Implement package command")
+    # Get all profiles
+    profiles = generate_all_profiles()
+    total_profiles = len(profiles)
+
+    logger.info(
+        f"Creating packages for {total_profiles} profile combinations...")
+    logger.info(f"Using {args.jobs} parallel jobs")
+
+    # Create build-matrix directory for logs
+    BUILD_PATH: Path = Path(args.path).resolve()
+
+    # Check for conanfile.py existence
+    if not (BUILD_PATH / "conanfile.py").exists():
+        logger.error(f"❌ No conanfile.py found in {BUILD_PATH}")
+        logger.error(
+            "Please ensure you're running this command in a directory with a 'conanfile.py' file")
+        return 1
+
+    BUILD_DIR: Path = BUILD_PATH / "build-matrix"
+    BUILD_DIR.mkdir(exist_ok=True)
+    logger.info(f"Package builds will be logged to: {BUILD_DIR}")
+
+    # Set build directory for all profiles
+    for profile in profiles:
+        profile.set_build_dir(BUILD_DIR)
+
+    # Track progress
+    completed_count = 0
+    failed_builds = []
+    lock = threading.Lock()
+
+    def build_profile(profile: Profile) -> BuildProfileResult:
+        """Create package for a single profile and return result"""
+        nonlocal completed_count
+
+        # Create profile directory and write profile file
+        PROFILE_BUILD_DIR = profile.build_dir()
+        PROFILE_BUILD_DIR.mkdir(exist_ok=True)
+        Path(profile.profile_path()).write_text(profile.content)
+
+        LOG_FILE = profile.log_file()
+
+        COMMAND = ['conan', 'create', str(BUILD_PATH),
+                   '-pr', str(profile.profile_path().resolve()),
+                   '--version', args.version]
+        try:
+            # Run conan create command
+            result = subprocess.run(COMMAND,
+                                    capture_output=True,
+                                    text=True,
+                                    # 5 minute timeout per package creation
+                                    timeout=300)
+
+            # Write logs
+            log_content = f"Command: {' '.join(COMMAND)}\n"
+            log_content += f"Return code: {result.returncode}\n\n"
+            log_content += "=== STDOUT ===\n"
+            log_content += result.stdout
+            log_content += "\n=== STDERR ===\n"
+            log_content += result.stderr
+            LOG_FILE.write_text(log_content)
+
+            # Update progress
+            with lock:
+                completed_count += 1
+                if result.returncode == 0:
+                    logger.info(
+                        f"✅ [{completed_count}/{total_profiles}] {profile.name}")
+                    return BuildProfileResult(profile.name, True, None)
+                else:
+                    logger.error(
+                        f"❌ [{completed_count}/{total_profiles}] {profile.name}")
+                    return BuildProfileResult(profile.name, False, LOG_FILE)
+
+        except subprocess.TimeoutExpired:
+            with lock:
+                completed_count += 1
+                logger.error(
+                    f"‼️⏱️[{completed_count}/{total_profiles}] {profile.name} TIMEOUT")
+                LOG_FILE.write_text(
+                    f"Package creation timed out after 300 seconds")
+                return BuildProfileResult(profile.name, False, LOG_FILE)
+        except Exception as e:
+            with lock:
+                completed_count += 1
+                logger.error(
+                    f"‼️ [{completed_count}/{total_profiles}] {profile.name} ERROR: {e}")
+                LOG_FILE.write_text(f"Package creation error: {e}")
+                return BuildProfileResult(profile.name, False, LOG_FILE)
+
+    # Execute package creation in parallel using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=args.jobs) as executor:
+        # Submit all package creation jobs
+        future_to_profile = {executor.submit(
+            build_profile, profile): profile for profile in profiles}
+
+        # Collect results as they complete
+        for future in as_completed(future_to_profile):
+            result = future.result()
+            if not result.success:
+                failed_builds.append(result)
+
+    # Summary
+    logger.info(f"\n{'='*60}")
+    logger.info(
+        f"Package Creation Complete: {completed_count}/{total_profiles} profiles processed")
+    logger.info(f"Successful: {completed_count - len(failed_builds)}")
+    logger.info(f"Failed: {len(failed_builds)}")
+
+    if failed_builds:
+        logger.error("\nFailed packages:")
+        for result in failed_builds:
+            logger.error(f"  - {result.profile_name}: {result.log_file}")
+        return 1
+    else:
+        logger.info("\nAll packages created successfully!")
+        return 0
 
 
 @conan_subcommand()
@@ -585,12 +683,12 @@ def hal(conan_api: ConanAPI, parser, *args):
         action='store_true',
         help='Enable verbose output'
     )
-    parser.add_argument(
-        '--version',
-        action='version',
-        version='conan-hal-command: 0.0.0',
-        help='Show version and exit'
-    )
+    # parser.add_argument(
+    #     '--version',
+    #     action='version',
+    #     version='conan-hal-command: 0.0.0',
+    #     help='Show version and exit'
+    # )
 
     parser.epilog = """
 Examples:
