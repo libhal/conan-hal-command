@@ -30,9 +30,29 @@ class Profile:
     Represents a Conan profile with a name and content.
     """
 
-    def __init__(self, name: str, content: str):
+    def __init__(self, name: str, content: str, build_dir: Optional[Path] = None):
         self.name = name
         self.content = content
+        self._build_dir = build_dir
+
+    def set_build_dir(self, build_dir: Path) -> None:
+        """Set the build directory for this profile"""
+        self._build_dir = build_dir
+
+    def build_dir(self) -> Path:
+        """Get the build directory for this profile"""
+        if self._build_dir is None:
+            raise ValueError(f"No build directory set for profile '{self.name}'. "
+                             "Set it via set_build_dir() or during initialization")
+        return self._build_dir / self.name
+
+    def profile_path(self) -> Path:
+        """Get the profile file path for this profile"""
+        return self.build_dir() / 'profile'
+
+    def log_file(self) -> Path:
+        """Get the log file path for this profile"""
+        return self.build_dir() / 'log'
 
 
 class BuildProfileResult:
@@ -64,8 +84,21 @@ def generate_arm_cortex_m_profiles() -> List[Profile]:
     # Architectures can be either strings or tuples (arch_name, min_version)
     # Tuple format: (architecture_name, minimum_compiler_version)
     architectures = [
-        'cortex-m0', 'cortex-m0plus', 'cortex-m1', 'cortex-m3', 'cortex-m4', 'cortex-m4f', 'cortex-m7', 'cortex-m7f', 'cortex-m7d', 'cortex-m23', 'cortex-m33', 'cortex-m33f', 'cortex-m35pf', 'cortex-m55',
-        ('cortex-m85', '13.2'),  # Requires GCC 13.2 or newer
+        'cortex-m0',
+        'cortex-m0plus',
+        'cortex-m1',
+        'cortex-m3',
+        'cortex-m4',
+        'cortex-m4f',
+        'cortex-m7',  # comment these out later
+        'cortex-m7f',  # comment these out later
+        'cortex-m7d',  # comment these out later
+        'cortex-m23',  # comment these out later
+        'cortex-m33',  # comment these out later
+        'cortex-m33f',  # comment these out later
+        'cortex-m35pf',  # comment these out later
+        'cortex-m55',  # comment these out later
+        ('cortex-m85', '13.2'),  # comment these out later
     ]
 
     build_types = [
@@ -365,22 +398,38 @@ def hal_build_matrix(conan_api: ConanAPI, parser, subparser, *args):
     failed_builds = []
     lock = threading.Lock()
 
+    logging.debug(f"PROFILE_BUILD_DIR={BUILD_DIR}")
+
+    # Sequential install to avoid CMakePresets.json & compile_commands.json
+    # collision
+    for profile in profiles:
+        profile.set_build_dir(BUILD_DIR)
+        PROFILE_BUILD_DIR = BUILD_DIR / profile.name
+
+        logging.debug(f"PROFILE_PATH={profile.profile_path()}")
+        logging.debug(f"LOG_FILE={profile.log_file()}")
+
+        PROFILE_BUILD_DIR.mkdir(exist_ok=True)
+        Path(profile.profile_path()).write_text(profile.content)
+
+        logging.info(f"⚙️ Running Conan Install: {profile.name}")
+        subprocess.run(
+            ['conan', 'install', '.', '-pr',
+                str(profile.profile_path().resolve())],
+            capture_output=True,
+            check=True,
+            timeout=30
+        )
+
     def build_profile(profile: Profile) -> BuildProfileResult:
         """Build a single profile and return result"""
         nonlocal completed_count
-        PROFILE_BUILD_DIR = BUILD_DIR / profile.name
-        PROFILE_PATH = PROFILE_BUILD_DIR / 'profile'
-        LOG_FILE = PROFILE_BUILD_DIR / 'log'
 
-        logging.debug(f"PROFILE_BUILD_DIR={PROFILE_BUILD_DIR}")
-        logging.debug(f"PROFILE_PATH={PROFILE_PATH}")
-        logging.debug(f"LOG_FILE={LOG_FILE}")
+        LOG_FILE = profile.log_file()
 
-        PROFILE_BUILD_DIR.mkdir(exist_ok=True)
-        Path(PROFILE_PATH).write_text(profile.content)
         COMMAND = ['conan', 'build', str(BUILD_PATH),
-                   '-pr', str(PROFILE_PATH.resolve()),
-                   '-of', str(PROFILE_BUILD_DIR.resolve())]
+                   '-pr', str(profile.profile_path().resolve()),
+                   '-of', str(profile.build_dir().resolve())]
         try:
             # Run conan build command
             result = subprocess.run(COMMAND,
