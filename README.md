@@ -82,9 +82,9 @@ conan hal setup --skip-default-profile --skip-compiler-profiles
 ### 🔮 Future Commands
 
 - `conan hal new` - Create a new libhal project, device library, platform library, or board library
-- `conan hal download-compilers` - Download & install cross-compilers
-- `conan hal build` - Build against multiple profiles/configurations
-- `conan hal package` - Similiar to build but also installs packages
+- `conan hal download-compilers` - Download & install all cross-compilers
+- `conan hal build-matrix` - Cross build a library against every supported libhal target
+- `conan hal package-matrix` - Cross build package for a library against every supported libhal target
 - `conan hal flash` - Flash binary to target device
 - `conan hal debug` - Start debug session with target device
 
